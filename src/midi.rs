@@ -1,11 +1,13 @@
 use std::error;
 use std::fmt;
-use std::convert::From;
+use std::convert::{From, TryInto};
 use std::io::{Error,Read};
 
 use num_traits::FromPrimitive;
+use std::convert::TryFrom;
 
 use util::read_byte;
+use std::ops::Index;
 
 /// An error that can occur trying to parse a midi message
 #[derive(Debug)]
@@ -50,7 +52,8 @@ impl fmt::Display for MidiError {
 
 /// The status field of a midi message indicates what midi command it
 /// represents and what channel it is on
-#[derive(Debug, PartialEq, Clone, Copy, FromPrimitive)]
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(u8)]
 pub enum Status {
     // voice
     NoteOff = 0x80,
@@ -61,7 +64,7 @@ pub enum Status {
     ChannelAftertouch = 0xD0,
     PitchBend = 0xE0,
 
-    // sysex
+    // system common
     SysExStart = 0xF0,
     MIDITimeCodeQtrFrame = 0xF1,
     SongPositionPointer = 0xF2,
@@ -76,12 +79,72 @@ pub enum Status {
     SystemReset = 0xFF,
 }
 
+impl Status {
+    fn from_raw_msg(msg: &[u8]) -> Option<Self> {
+        if msg.len() > 0 {
+            Status::try_from(msg[0]).ok()
+        } else {
+            None
+        }
+    }
+}
+
+impl TryFrom <u8> for Status {
+    type Error = &'static str;
+
+    fn try_from(command: u8) -> Result<Self, Self::Error> {
+        let err = "Invalid command byte, unable to create Status";
+        
+        match command & STATUS_MASK {
+            // voice commands
+            0x80 => Ok(Status::NoteOff),
+            0x90 => Ok(Status::NoteOn),
+            0xA0 => Ok(Status::PolyphonicAftertouch),
+            0xB0 => Ok(Status::ControlChange),
+            0xC0 => Ok(Status::ProgramChange),
+            0xD0 => Ok(Status::ChannelAftertouch),
+            0xE0 => Ok(Status::PitchBend),
+            // system exclusive commands
+            0xF0 => match command {
+                0xF0 => Ok(Status::SysExStart),
+                0xF1 => Ok(Status::MIDITimeCodeQtrFrame),
+                0xF2 => Ok(Status::SongPositionPointer),
+                0xF3 => Ok(Status::SongSelect),
+                0xF6 => Ok(Status::TuneRequest),
+                0xF7 => Ok(Status::SysExEnd),
+                0xF8 => Ok(Status::TimingClock),
+                0xFA => Ok(Status::Start),
+                0xFB => Ok(Status::Continue),
+                0xFC => Ok(Status::Stop),
+                0xFE => Ok(Status::ActiveSensing),
+                0xFF => Ok(Status::SystemReset),
+                _ => Err(err),
+            }
+            _ => Err(err),
+        }
+    }
+}
+
+impl FromPrimitive for Status {
+    #[inline(always)]
+    fn from_i64(status: i64) -> Option<Self> {
+        if status >= 0 { FromPrimitive::from_u64(status as u64) }
+        else { None }
+    }
+
+    #[inline(always)]
+    fn from_u64(status: u64) -> Option<Self> {
+        if status <= std::u8::MAX as u64 { Self::try_from(status as u8).ok() }
+        else { None }
+    }
+}
+
 /// Midi message building and parsing.  See
 /// http://www.midi.org/techspecs/midimessages.php for a description
 /// of the various Midi messages that exist.
 #[derive(Debug, Default)]
 pub struct MidiMessage {
-    pub data: Vec<u8>,
+    data: Vec<u8>,
 }
 
 impl Clone for MidiMessage {
@@ -104,19 +167,24 @@ pub fn make_status(status: Status, channel: u8) -> u8 {
 impl MidiMessage {
     /// Return the status (type) of this message
     pub fn status(&self) -> Status {
-        Status::from_u8(self.data[0] & STATUS_MASK).unwrap()
+        // unwrap should be ok here since this has been validated during creation
+        Status::from_raw_msg(&self.data).unwrap()
     }
 
     /// Return the channel this message is on (TODO: return 0 for messages with no channel)
     pub fn channel(&self) -> Option<u8> {
         match self.status() {
+            // commands with channel
             Status::NoteOff |
             Status::NoteOn |
             Status::PolyphonicAftertouch |
             Status::ControlChange |
             Status::ProgramChange |
             Status::ChannelAftertouch |
-            Status::PitchBend => Some(self.data[0] & CHANNEL_MASK),
+            Status::PitchBend => {
+                Some(self.data[0] & CHANNEL_MASK)
+            },
+            // commands without channel
             Status::SysExStart |
             Status::MIDITimeCodeQtrFrame |
             Status::SongPositionPointer |
@@ -128,23 +196,64 @@ impl MidiMessage {
             Status::Continue |
             Status::Stop |
             Status::ActiveSensing |
-            Status::SystemReset => None
+            Status::SystemReset => {
+                None
+            },
         }
     }
 
-    /// Get te data at index `index` from this message.  Status is at
-    /// index 0
+    /// Returns a slice of bytes representing the underlying raw MIDI message data for this MIDI
+    /// event. Status (command) byte is at index 0.
     #[inline(always)]
-    pub fn data(&self, index: usize) -> u8 {
-        self.data[index]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn validate(bytes: &[u8]) -> Result<(), MidiError> {
+        if bytes.len() <= 0 {
+            return Err(MidiError::OtherErr("MIDI message data has insufficient length."));
+        }
+
+        let command_byte = bytes[0];
+        let command = Status::from_raw_msg(&bytes);
+        if command.is_none() {
+            return Err(MidiError::InvalidStatus(command_byte));
+        }
+
+        match MidiMessage::data_len(command_byte) {
+            -1 => {
+                // variable sized message
+                // TODO determine if these ever exist, apart from SysEx messages (handled below separately)
+                Ok(())
+            }
+            -2 => {
+                // System Exclusive message
+                // TODO check this in some higher level
+                Ok(())
+            }
+            -3 => {
+                Err(MidiError::OtherErr("Unable to calculate message size."))
+            }
+            data_len => {
+                if let Ok(msg_len) = (data_len + 1).try_into() {
+                    if bytes.len() == msg_len {
+                        Ok(())
+                    } else {
+                        Err(MidiError::OtherErr("Raw message data length does not match MIDI command length."))
+                    }
+                } else {
+                    Err(MidiError::OtherErr("Calculated message length is out of range."))
+                }
+            }
+        }
     }
 
     /// Create a midi message from a vector of bytes
     #[inline(always)]
-    pub fn from_bytes(bytes: Vec<u8>) -> MidiMessage{
-        // TODO: Validate bytes
-        MidiMessage {
-            data: bytes,
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<MidiMessage, MidiError> {
+        match MidiMessage::validate(&bytes) {
+            Ok(_) => Ok(MidiMessage { data: bytes }),
+            Err(e) => Err(e),
         }
     }
 
@@ -152,8 +261,8 @@ impl MidiMessage {
     // -1 -> variable sized message, call get_variable_size
     // -2 -> sysex, read until SysExEnd
     // -3 -> invalid status
-    pub fn data_bytes(status: u8) -> isize {
-        match Status::from_u8(status & STATUS_MASK) {
+    pub fn data_len(status: u8) -> isize {
+        match Status::try_from(status).ok() {
             Some(stat) => {
                 match stat {
                     Status::NoteOff |
@@ -189,7 +298,7 @@ impl MidiMessage {
     pub fn next_message_given_status(stat: u8, reader: &mut dyn Read) -> Result<MidiMessage, MidiError> {
         let mut ret:Vec<u8> = Vec::with_capacity(3);
         ret.push(stat);
-        match MidiMessage::data_bytes(stat) {
+        match MidiMessage::data_len(stat) {
             0 => {}
             1 => { ret.push(try!(read_byte(reader))); }
             2 => { ret.push(try!(read_byte(reader)));
@@ -214,7 +323,7 @@ impl MidiMessage {
         let mut ret:Vec<u8> = Vec::with_capacity(3);
         ret.push(stat);
         ret.push(databyte);
-        match MidiMessage::data_bytes(stat) {
+        match MidiMessage::data_len(stat) {
             0 => { panic!("Can't have zero length message with running status"); }
             1 => { } // already read it
             2 => { ret.push(try!(read_byte(reader))); } // only need one more byte
@@ -294,6 +403,14 @@ impl MidiMessage {
         }
     }
 
+}
+
+impl Index<usize> for MidiMessage {
+    type Output = u8;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.data[index]
+    }
 }
 
 impl fmt::Display for Status {

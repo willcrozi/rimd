@@ -107,7 +107,7 @@ impl SMFReader {
                 let mut last = 0u8;
                 for e in res.iter().rev() {
                     match e.event {
-                        Event::Midi(ref m) => { last = m.data[0]; break; }
+                        Event::Midi(ref m) => { last = m[0]; break; }
                         _ => ()
                     }
                 }

@@ -65,9 +65,9 @@ impl PartialEq for AbsoluteEvent {
                     me.command == you.command
                 },
                 (&Event::Midi(ref me),&Event::Midi(ref you)) => {
-                    me.data(0) == you.data(0)
+                    me[0] == you[0]
                         &&
-                    me.data(1) == me.data(1)
+                    me[1] == you[1]
                 },
             }
         } else {
@@ -99,12 +99,12 @@ impl Ord for AbsoluteEvent {
                         me.command.cmp(&you.command)
                     },
                     (&Event::Midi(ref me),&Event::Midi(ref you)) => {
-                        if      me.data(0) < you.data(0) { Ordering::Less }
-                        else if me.data(0) > you.data(0) { Ordering::Greater }
+                        if me[0] < you[0] { Ordering::Less }
+                        else if me[0] > you[0] { Ordering::Greater }
                         else {
-                            if me.data(1) < you.data(1) {
+                            if me[1] < you[1] {
                                 Ordering::Less
-                            } else if me.data(1) > you.data(1) {
+                            } else if me[1] > you[1] {
                                 Ordering::Greater
                             } else {
                                 res

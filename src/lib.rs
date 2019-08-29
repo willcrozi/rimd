@@ -109,7 +109,7 @@ impl Event {
     /// Return the number of bytes this event uses.
     pub fn len(&self) -> usize {
         match *self {
-            Event::Midi(ref m) => { m.data.len() }
+            Event::Midi(ref m) => { m.data().len() }
             Event::Meta(ref m) => {
                 let v = SMFWriter::vtime_to_vec(m.length);
                 // +1 for command byte +1 for 0xFF to indicate Meta event
